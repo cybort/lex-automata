@@ -806,6 +806,7 @@ function Match({
           onThreshold={setThreshold}
           fast={drills?.fast}
           slow={drills?.slow}
+          mixed={drills?.mixed}
           slowIsFp={drills?.slowIsFp ?? false}
           onFill={setText}
         />
@@ -886,6 +887,7 @@ function CostBoard({
   onThreshold,
   fast,
   slow,
+  mixed,
   slowIsFp,
   onFill,
 }: {
@@ -893,6 +895,7 @@ function CostBoard({
   onThreshold: (n: number) => void;
   fast?: string;
   slow?: string;
+  mixed?: string | null;
   slowIsFp: boolean;
   onFill: (text: string) => void;
 }) {
@@ -942,7 +945,11 @@ function CostBoard({
         {ahead
           ? `监测后的代价是线性的 ${ratio.toFixed(2)} 倍，省 ${budget.linear - budget.adaptive} 步。`
           : `监测后的代价是线性的 ${ratio.toFixed(2)} 倍，多 ${budget.adaptive - budget.linear} 步。`}
-        {budget.naive > budget.adaptive ? ` 若死磕预过滤还要再多 ${budget.naive - budget.adaptive} 步。` : ""}
+        {budget.naive === budget.adaptive
+          ? " 没有越线，监测不改道，所以和死磕预过滤步数相同。"
+          : budget.naive > budget.adaptive
+            ? ` 死磕还要再花 ${budget.naive - budget.adaptive} 步，是越线之后省下的唤醒。`
+            : ` 退回后剩余文本改由 DFA 重扫，比继续过滤还多 ${budget.adaptive - budget.naive} 步。`}
       </p>
       <div className="mt-3 grid gap-2">
         <CostBar label="线性扫描" value={budget.linear} max={max} tone="bg-muted" />
@@ -960,6 +967,11 @@ function CostBoard({
           {slow ? (
             <button type="button" onClick={() => onFill(slow)} className="h-11 rounded-sm border border-line px-3 text-sm text-fg hover:border-sage">
               {slowIsFp ? "填入假阳性" : "填入密集命中"}
+            </button>
+          ) : null}
+          {mixed ? (
+            <button type="button" onClick={() => onFill(mixed)} className="h-11 rounded-sm border border-line px-3 text-sm text-fg hover:border-sage">
+              填入临界
             </button>
           ) : null}
         </div>

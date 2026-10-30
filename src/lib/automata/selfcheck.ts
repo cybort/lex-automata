@@ -212,6 +212,13 @@ sound("a|ε");
   const drills = exampleHaystacks(dfa, compiled.model.alphabet, pre.cuts);
   if (!drills?.slowIsFp) throw new Error("a+b should offer a false-positive sample");
   if (drills.fast.includes("a")) throw new Error(`fast sample should avoid the literal, got ${drills.fast}`);
+  if (!drills.mixed) throw new Error("a+b should offer a mixed sample");
+  const mixedSyms = [...drills.mixed];
+  const mixed = playPrefilter(compiled.model.patterns, mixedSyms, "ac");
+  const low = assessBudget(dfa, mixedSyms, mixed.spans, mixed.cuts, 0.4);
+  const high = assessBudget(dfa, mixedSyms, mixed.spans, mixed.cuts, 0.9);
+  if (low.fallbackAt === null || !(low.naive > low.adaptive)) throw new Error(`mixed low ${low.naive} ${low.adaptive}`);
+  if (high.fallbackAt !== null || high.naive !== high.adaptive) throw new Error(`mixed high should stay on the prefilter ${high.naive} ${high.adaptive}`);
 }
 
 console.log("selfcheck ok", cases.length, "cases");

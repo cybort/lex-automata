@@ -698,7 +698,7 @@ export function exampleHaystacks(
   dfa: DFA,
   alphabet: string[],
   cuts: Cut[],
-): { fast: string; slow: string; slowIsFp: boolean } | null {
+): { fast: string; slow: string; slowIsFp: boolean; mixed: string | null } | null {
   const needles = cuts.flatMap((c) => c.literals ?? []);
   if (!needles.length || !alphabet.length) return null;
   const fastSyms: string[] = [];
@@ -735,5 +735,33 @@ export function exampleHaystacks(
       }
     }
   }
-  return { fast: fastSyms.join(""), slow, slowIsFp };
+  return { fast: fastSyms.join(""), slow, slowIsFp, mixed: mixedHaystack(dfa, needles) };
+}
+
+function shortestAccept(dfa: DFA): string | null {
+  const seen = new Set<number>([dfa.start]);
+  const queue: { state: number; word: string }[] = [{ state: dfa.start, word: "" }];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (!cur) break;
+    if (cur.word && (dfa.accept[cur.state] ?? []).length) return cur.word;
+    if (chars(cur.word).length >= 8) continue;
+    for (let i = 0; i < dfa.alphabet.length; i++) {
+      const nxt = dfa.delta[cur.state][i];
+      if (nxt === undefined || dfa.dead[nxt] || seen.has(nxt)) continue;
+      seen.add(nxt);
+      queue.push({ state: nxt, word: cur.word + dfa.alphabet[i] });
+    }
+  }
+  return null;
+}
+
+function mixedHaystack(dfa: DFA, needles: string[]): string | null {
+  const bad = [...needles].sort((a, b) => chars(a).length - chars(b).length).find((lit) => {
+    const syms = chars(lit);
+    return !runFrom(dfa, syms, 0, syms.length).ok;
+  });
+  const good = shortestAccept(dfa);
+  if (!bad || !good) return null;
+  return good + good + bad.repeat(6);
 }
