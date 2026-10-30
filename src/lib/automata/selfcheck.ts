@@ -1,6 +1,7 @@
 import { agrees, compile, isomorphic } from "./pipeline";
 import { dfaTags } from "./nfa";
-import { simulateCaptures } from "./match";
+import { matchNfa, simulateCaptures } from "./match";
+import { prefilterBlocks, requiredLiterals } from "./prefilter";
 
 function words(alpha: string[], maxLen: number): string[][] {
   const out: string[][] = [[]];
@@ -127,6 +128,63 @@ if (capsOf("键值: (?<键>[ab]+):(?<值>[01]+)", "ab:01") !== "键=ab,值=01") 
 check("(?<词>a+)b");
 check("(a*)(a*)");
 check("键值: (?<键>[ab]+):(?<值>[01]+)", "", 3);
+
+function lits(source: string): (string[] | null)[] {
+  const compiled = compile(source, "");
+  if (!compiled.ok) throw new Error(`${source} :: ${compiled.message}`);
+  return compiled.model.patterns.map((p) => requiredLiterals(p.ast));
+}
+
+function showLits(xs: (string[] | null)[]): string {
+  return xs.map((row) => (row ? [...row].sort().join("|") : "∅")).join(",");
+}
+
+if (showLits(lits("(a|b)*abb")) !== "abb") throw new Error(`abb lits ${showLits(lits("(a|b)*abb"))}`);
+if (showLits(lits("a(b|c)*")) !== "a") throw new Error(`a(b|c)* lits ${showLits(lits("a(b|c)*"))}`);
+if (showLits(lits("a*b")) !== "b") throw new Error(`a*b lits ${showLits(lits("a*b"))}`);
+if (showLits(lits("(0|1)*1")) !== "1") throw new Error(`odd lits ${showLits(lits("(0|1)*1"))}`);
+if (showLits(lits("a*")) !== "∅") throw new Error(`a* lits ${showLits(lits("a*"))}`);
+if (showLits(lits("a|ε")) !== "∅") throw new Error(`a|ε lits ${showLits(lits("a|ε"))}`);
+if (showLits(lits("ab|cd")) !== "ab|cd") throw new Error(`ab|cd lits ${showLits(lits("ab|cd"))}`);
+if (showLits(lits("你好+")) !== "你好") throw new Error(`你好 lits ${showLits(lits("你好+"))}`);
+if (showLits(lits("(?<键>[ab]+):(?<值>[01]+)")) !== ":0|:1") throw new Error(`kv lits ${showLits(lits("(?<键>[ab]+):(?<值>[01]+)"))}`);
+if (showLits(lits("整数: (0|1)+\n标识: (a|b)(a|b|0|1)*")) !== "0|1,a|b") {
+  throw new Error(`rules lits ${showLits(lits("整数: (0|1)+\n标识: (a|b)(a|b|0|1)*"))}`);
+}
+
+function sound(source: string, alpha = "", maxLen = 4) {
+  const compiled = compile(source, alpha);
+  if (!compiled.ok) throw new Error(`${source} :: ${compiled.message}`);
+  const m = compiled.model;
+  const names = m.patterns.map((p) => p.name);
+  const bag = words(m.alphabet, Math.min(maxLen, m.alphabet.length > 3 ? 3 : maxLen));
+  for (const kind of ["ac", "teddy"] as const) {
+    for (const w of bag) {
+      const accepted = matchNfa(m.nfa, w, names).at(-1)?.verdict === "accept";
+      const blocked = prefilterBlocks(m.patterns, w, kind);
+      if (accepted && blocked) throw new Error(`${kind} blocked ${source} / ${w.join("") || "ε"}`);
+    }
+  }
+}
+
+sound("(a|b)*abb");
+sound("a*");
+sound("a*b");
+sound("a|b");
+sound("ab|cd");
+sound("(0|1)*1");
+sound("你好+");
+sound("(?<键>[ab]+):(?<值>[01]+)", "", 3);
+sound("整数: (0|1)+\n标识: (a|b)(a|b|0|1)*", "", 3);
+sound("a|ε");
+{
+  const compiled = compile("(a|b)*abb", "");
+  if (!compiled.ok) throw new Error(`abb ${compiled.message}`);
+  if (!prefilterBlocks(compiled.model.patterns, [..."ababa"], "ac")) throw new Error("ac missed ababa");
+  if (!prefilterBlocks(compiled.model.patterns, [..."ababa"], "teddy")) throw new Error("teddy missed ababa");
+  if (prefilterBlocks(compiled.model.patterns, [..."ababb"], "ac")) throw new Error("ac blocked ababb");
+  if (prefilterBlocks(compiled.model.patterns, [..."ababb"], "teddy")) throw new Error("teddy blocked ababb");
+}
 
 console.log("selfcheck ok", cases.length, "cases");
 console.log(

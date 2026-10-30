@@ -3,6 +3,7 @@ import { Dices, Download, Pause, Play, SkipBack, SkipForward } from "lucide-reac
 import { AutomatonFigure } from "@/components/lexica/graph";
 import { randomProgram } from "@/lib/automata/random";
 import { lazyWalk, matchDfa, matchNfa, simulateCaptures, textToSymbols, witnesses, type Capture } from "@/lib/automata/match";
+import { playPrefilter, viewPrefilter, type FilterKind, type TeddySnap } from "@/lib/automata/prefilter";
 import { printAst } from "@/lib/automata/parse";
 import { compile, type Model } from "@/lib/automata/pipeline";
 import type { BrzPhase, DFA, HopFrame, NFA, Note } from "@/lib/automata/types";
@@ -698,6 +699,7 @@ function Match({
   const names = model.patterns.map((p) => p.name);
   const [text, setText] = useState("abb");
   const [mode, setMode] = useState<"nfa" | "lazy" | "hop" | "brz">("nfa");
+  const [filter, setFilter] = useState<"off" | FilterKind>("off");
   const symbols = textToSymbols(text);
   const caps = useMemo(() => simulateCaptures(model.nfa, symbols), [model, text]);
   const hopDfa = model.hopThom.ok ? model.hopThom.value.dfa : model.thompson.dfa;
@@ -709,22 +711,37 @@ function Match({
     if (mode === "hop") return matchDfa(hopDfa, symbols, names);
     return matchDfa(brzDfa, symbols, names);
   }, [mode, model, symbols, names, lazy, hopDfa, brzDfa]);
+  const pre = useMemo(
+    () => (filter === "off" ? null : playPrefilter(model.patterns, symbols, filter)),
+    [filter, model, symbols],
+  );
+  const play = useMemo(() => {
+    const machine = frames.map((f) => ({ ...f, phase: "machine" as const, hits: [] as { start: number; end: number }[], teddy: null as TeddySnap | null }));
+    if (!pre) return machine;
+    const head = pre.frames.map((f) => ({ ...f, phase: "filter" as const, tags: [] as number[] }));
+    if (pre.blocked) return head;
+    return [...head, ...machine];
+  }, [frames, pre]);
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   useEffect(() => {
     setStep(0);
     setPlaying(false);
-  }, [text, mode, model]);
-  const safe = Math.min(step, Math.max(0, frames.length - 1));
-  const frame = frames[safe];
-  const view = matchView(mode, model.nfa, lazy.dfa, hopDfa, brzDfa, frame, names, showDead);
+  }, [text, mode, model, filter]);
+  const safe = Math.min(step, Math.max(0, play.length - 1));
+  const frame = play[safe];
+  const machineFrame = frame?.phase === "machine" ? frame : undefined;
+  const view =
+    frame?.phase === "filter" && filter === "ac"
+      ? viewPrefilter(pre?.ac ?? null, frame.active[0] ?? 0, frame.hot)
+      : matchView(mode, model.nfa, lazy.dfa, hopDfa, brzDfa, machineFrame, names, showDead);
   const samples = witnesses(hopDfa, names);
-  const verdict = frames[frames.length - 1];
+  const verdict = play[play.length - 1];
   return (
     <StageShell
       kicker="匹配回放"
       title="把文本喂进四台机器"
-      body="NFA 用活动集和 ε-闭包。惰性 DFA 只沿着这段文本现算子集。最小 DFA 在完整转移上一步一格。捕获组写在 Thompson 的 ε 边上，开时记下位置，闭时截断；同一组再碰上就覆盖。"
+      body="NFA 用活动集和 ε-闭包。惰性 DFA 只沿着这段文本现算子集。最小 DFA 在完整转移上一步一格。打开预过滤后，先拆出每条规则的必现子串，用 Aho-Corasick 或 Teddy 挡掉不可能的文本，活下来才启动机器。捕获组写在 Thompson 的 ε 边上。"
     >
       <div className="mb-3 flex flex-wrap gap-2">
         {(
@@ -745,6 +762,34 @@ function Match({
           </button>
         ))}
       </div>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted">预过滤</span>
+        {(
+          [
+            ["off", "关闭"],
+            ["ac", "Aho-Corasick"],
+            ["teddy", "Teddy"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setFilter(id)}
+            className={"h-11 rounded-sm px-3 text-sm " + (filter === id ? "bg-sage text-ink" : "border border-line text-fg")}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {pre ? (
+        <p className="mb-3 font-mono text-sm text-fg">
+          {pre.cuts.map((c) => (
+            <span key={c.rule} className="mr-4">
+              {c.name} {c.literals ? c.literals.join("|") : "∅"}
+            </span>
+          ))}
+        </p>
+      ) : null}
       <label className="text-sm text-muted" htmlFor="sample">
         待匹配文本。整串必须属于某条规则才算接受。
       </label>
@@ -773,20 +818,37 @@ function Match({
         verdict={verdict?.verdict}
         tags={verdict?.tags ?? []}
         names={names}
-        captures={caps[frame?.index ?? 0] ?? []}
+        captures={frame?.phase === "machine" ? (caps[frame?.index ?? 0] ?? []) : []}
+        hits={frame?.hits ?? []}
       />
       <div className="mt-3">
-        <AutomatonFigure model={view} machineKey={`m-${mode}-${safe}-${text}`} caption={mode === "lazy" ? `惰性 ${lazy.dfa.states.length} 状态 / 完全 ${model.thompson.dfa.states.length}` : "匹配"} />
+        {frame?.phase === "filter" && frame.teddy ? (
+          <TeddyBoard snap={frame.teddy} />
+        ) : (
+          <AutomatonFigure
+            model={view}
+            machineKey={`m-${mode}-${filter}-${frame?.phase ?? "m"}-${safe}-${text}`}
+            caption={
+              frame?.phase === "filter"
+                ? filter === "ac"
+                  ? "Aho-Corasick"
+                  : "Teddy"
+                : mode === "lazy"
+                  ? `惰性 ${lazy.dfa.states.length} 状态 / 完全 ${model.thompson.dfa.states.length}`
+                  : "匹配"
+            }
+          />
+        )}
         <Player
           step={safe}
-          count={frames.length}
+          count={play.length}
           playing={playing}
           pace={pace}
           setPace={setPace}
           onStep={setStep}
           onPlay={setPlaying}
           note={frame}
-          notes={frames.map((f) => ({ step: f.step, title: f.title, detail: f.detail }))}
+          notes={play.map((f, i) => ({ step: i, title: f.title, detail: f.detail }))}
         />
       </div>
     </StageShell>
@@ -823,6 +885,7 @@ function Tape({
   tags,
   names,
   captures,
+  hits = [],
 }: {
   symbols: string[];
   index: number;
@@ -830,6 +893,7 @@ function Tape({
   tags: number[];
   names: string[];
   captures: Capture[];
+  hits?: { start: number; end: number }[];
 }) {
   const done = verdict === "accept" || verdict === "reject";
   const live = verdict === "accept" ? captures.filter((c) => tags.includes(c.rule)) : captures;
@@ -838,22 +902,27 @@ function Tape({
     if (cap.start === null || cap.end === null) continue;
     for (let i = cap.start; i < cap.end; i++) marked.add(i);
   }
+  const hitAt = new Set<number>();
+  for (const hit of hits) for (let i = hit.start; i < hit.end; i++) hitAt.add(i);
   return (
     <div className="mt-4 rounded-md border border-line bg-surface px-3 py-3">
       <div className="flex flex-wrap gap-1 font-mono text-lg">
         {symbols.length === 0 ? <span className="text-muted">ε</span> : null}
-        {symbols.map((ch, i) => (
+        {symbols.map((ch, i) => {
+          const cursor = i === index && !done;
+          return (
           <span
             key={`${ch}-${i}`}
             className={
               "inline-flex h-11 min-w-8 items-center justify-center px-1 " +
-              (i < index ? "text-muted " : i === index && !done ? "bg-sage text-ink " : "text-fg ") +
+              (cursor ? "bg-sage text-ink " : hitAt.has(i) ? "bg-ember/30 text-fg " : i < index ? "text-muted " : "text-fg ") +
               (marked.has(i) ? "border-b-2 border-sage" : "")
             }
           >
             {ch}
           </span>
-        ))}
+          );
+        })}
       </div>
       <p className={"mt-2 text-sm " + (verdict === "accept" ? "text-sage" : verdict === "reject" ? "text-ember" : "text-muted")}>
         {verdict === "accept"
@@ -871,6 +940,29 @@ function Tape({
           ))}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+function TeddyBoard({ snap }: { snap: TeddySnap }) {
+  return (
+    <div className="rounded-md border border-line bg-bg px-3 py-3">
+      <p className="font-mono text-xs text-sage uppercase">Teddy 窗宽 {snap.w}</p>
+      <p className="mt-1 text-sm text-muted">每一位是一条子串的前 {snap.w} 个字符。当前窗口按列取掩码再求与，亮着的才核对整段。</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {snap.rows.map((row) => (
+          <span
+            key={row.lit}
+            className={
+              "rounded-sm border px-2 py-1 font-mono text-sm " +
+              (row.hit ? "border-sage bg-sage text-ink" : row.bit ? "border-ember text-ember" : "border-line text-fg")
+            }
+          >
+            {row.fp === row.lit ? row.lit : `${row.fp}→${row.lit}`}
+          </span>
+        ))}
+      </div>
+      <p className="mt-2 font-mono text-sm text-fg">{snap.window ? `窗口 ${snap.window}` : "还没开窗"}</p>
     </div>
   );
 }
