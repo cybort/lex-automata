@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "词法机",
+      "hasCanvas": false,
+      "bodyTextLen": 522,
+      "bodyTextHash": "9645afd692f728950164bc9d84b5f956b751c5e5664881f19ac30696e902c282",
+      "bodyTextPrefix": "LEXICA 词法机 正则集合摊成 Thompson NFA、惰性 DFA 和完全子集 DFA，再并排做 Hopcroft 与 ",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "词法机",
+      "hasCanvas": false,
+      "bodyTextLen": 522,
+      "bodyTextHash": "9645afd692f728950164bc9d84b5f956b751c5e5664881f19ac30696e902c282",
+      "bodyTextPrefix": "LEXICA 词法机 正则集合摊成 Thompson NFA、惰性 DFA 和完全子集 DFA，再并排做 Hopcroft 与 ",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}
