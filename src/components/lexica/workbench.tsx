@@ -807,6 +807,7 @@ function Match({
           fast={drills?.fast}
           slow={drills?.slow}
           mixed={drills?.mixed}
+          mixedSplits={drills?.mixedSplits ?? false}
           slowIsFp={drills?.slowIsFp ?? false}
           onFill={setText}
         />
@@ -888,6 +889,7 @@ function CostBoard({
   fast,
   slow,
   mixed,
+  mixedSplits,
   slowIsFp,
   onFill,
 }: {
@@ -896,6 +898,7 @@ function CostBoard({
   fast?: string;
   slow?: string;
   mixed?: string | null;
+  mixedSplits: boolean;
   slowIsFp: boolean;
   onFill: (text: string) => void;
 }) {
@@ -957,7 +960,7 @@ function CostBoard({
         <CostBar label="监测后退回" value={budget.adaptive} max={max} tone={ahead ? "bg-sage" : "bg-ember"} />
       </div>
       <p className="mt-2 text-sm text-muted">
-        过滤一步算 {1}，DFA 一步算 {4}。灰是没醒的字符，绿是确认成功，红是叫醒了却失败，退回之后改由 DFA 线性扫完。
+        过滤一步算 {1}，DFA 一步算 {4}。命中后按分隔符切成小段，整段停在接受态才算真唤醒。灰是没醒的字符，绿是确认成功，红是叫醒了却失败。
       </p>
       {fast ? (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -975,6 +978,15 @@ function CostBoard({
             </button>
           ) : null}
         </div>
+      ) : (
+        <p className="mt-3 text-sm text-muted">这些规则没有必现子串，过滤器不会命中，造不出临界样本。</p>
+      )}
+      {mixed ? (
+        <p className="mt-2 text-sm text-muted">
+          {mixedSplits
+            ? "临界把真匹配和只撞上子串的小段隔开。阈值 40% 会退回，90% 会继续死磕。"
+            : "这条语言里，子串一出现整段就能接受，假阳性造不出来。临界只能做成密集真命中，两条预过滤不会分开。"}
+        </p>
       ) : null}
     </div>
   );

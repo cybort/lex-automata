@@ -578,7 +578,6 @@ export function viewPrefilter(ac: AcMachine | null, active: number, hot: { from:
 export const FILTER_WEIGHT = 1;
 export const DFA_WEIGHT = 4;
 export const WAKE_FLOOR = 4;
-const LOOK_AHEAD = 8;
 
 export type Mark = "skip" | "tp" | "fp" | "linear";
 
@@ -605,19 +604,26 @@ export type Budget = {
   events: WakeEvent[];
 };
 
-function runFrom(dfa: DFA, symbols: string[], from: number, needEnd: number): { ok: boolean; steps: number; end: number } {
+function confirmSlot(
+  dfa: DFA,
+  symbols: string[],
+  hit: { start: number; end: number },
+): { ok: boolean; steps: number; from: number; end: number } {
+  const known = new Set(dfa.alphabet);
+  let from = hit.start;
+  while (from > 0 && known.has(symbols[from - 1])) from--;
+  let to = Math.min(symbols.length, Math.max(hit.end, hit.start));
+  while (to < symbols.length && known.has(symbols[to])) to++;
   let state = dfa.start;
   let steps = 0;
-  const limit = Math.min(symbols.length, Math.max(needEnd + LOOK_AHEAD, from));
-  for (let i = from; i < limit; i++) {
+  for (let i = from; i < to; i++) {
     const si = dfa.alphabet.indexOf(symbols[i]);
     steps++;
-    if (si < 0) return { ok: false, steps, end: i };
+    if (si < 0) return { ok: false, steps, from, end: i };
     state = dfa.delta[state][si];
-    if ((dfa.accept[state] ?? []).length > 0 && i + 1 >= needEnd) return { ok: true, steps, end: i + 1 };
-    if (dfa.dead[state]) return { ok: false, steps, end: i + 1 };
+    if (dfa.dead[state]) return { ok: false, steps, from, end: i + 1 };
   }
-  return { ok: false, steps, end: limit };
+  return { ok: (dfa.accept[state] ?? []).length > 0, steps, from, end: to };
 }
 
 export function assessBudget(
@@ -652,7 +658,7 @@ export function assessBudget(
   let fallbackAt: number | null = null;
 
   for (const hit of unique) {
-    const run = runFrom(dfa, symbols, hit.start, hit.end);
+    const run = confirmSlot(dfa, symbols, hit);
     naiveSteps += run.steps;
     if (fallbackAt !== null) continue;
     wakes++;
@@ -661,9 +667,8 @@ export function assessBudget(
     else falsePos++;
     const rate = wakes ? falsePos / wakes : 0;
     events.push({ start: hit.start, end: hit.end, ok: run.ok, steps: run.steps, rate });
-    const paintTo = Math.min(n, Math.max(hit.end, run.end));
-    for (let i = hit.start; i < paintTo; i++) marks[i] = run.ok ? "tp" : "fp";
-    if (wakes >= WAKE_FLOOR && rate > threshold) fallbackAt = Math.min(n, hit.end);
+    for (let i = run.from; i < Math.min(n, run.end); i++) marks[i] = run.ok ? "tp" : "fp";
+    if (wakes >= WAKE_FLOOR && rate > threshold) fallbackAt = Math.min(n, run.end);
   }
 
   if (forced) {
@@ -698,7 +703,7 @@ export function exampleHaystacks(
   dfa: DFA,
   alphabet: string[],
   cuts: Cut[],
-): { fast: string; slow: string; slowIsFp: boolean; mixed: string | null } | null {
+): { fast: string; slow: string; slowIsFp: boolean; mixed: string; mixedSplits: boolean } | null {
   const needles = cuts.flatMap((c) => c.literals ?? []);
   if (!needles.length || !alphabet.length) return null;
   const fastSyms: string[] = [];
@@ -716,9 +721,7 @@ export function exampleHaystacks(
   let slow = needles[0].repeat(8);
   let slowIsFp = false;
   for (const lit of [...needles].sort((a, b) => chars(a).length - chars(b).length)) {
-    const syms = chars(lit);
-    const run = runFrom(dfa, syms, 0, syms.length);
-    if (!run.ok) {
+    if (!wordOk(dfa, lit)) {
       slow = lit.repeat(8);
       slowIsFp = true;
       break;
@@ -726,42 +729,110 @@ export function exampleHaystacks(
   }
   if (!slowIsFp) {
     const ch = chars(needles[0])[0];
-    if (needles.includes(ch)) {
-      const repeated = chars(ch.repeat(12));
-      const fails = repeated.filter((_, i) => !runFrom(dfa, repeated, i, i + 1).ok).length;
-      if (fails >= WAKE_FLOOR) {
-        slow = ch.repeat(12);
-        slowIsFp = true;
+    if (needles.includes(ch) && chars(ch.repeat(12)).every((_, i, all) => !confirmSlot(dfa, all, { start: i, end: i + 1 }).ok)) {
+      slow = ch.repeat(12);
+      slowIsFp = true;
+    }
+  }
+  const mixed = criticalHaystack(dfa, cuts, needles);
+  return { fast: fastSyms.join(""), slow, slowIsFp, mixed: mixed.text, mixedSplits: mixed.splits };
+}
+
+function wordOk(dfa: DFA, word: string): boolean {
+  const syms = chars(word);
+  if (!syms.length) return (dfa.accept[dfa.start] ?? []).length > 0;
+  return confirmSlot(dfa, syms, { start: 0, end: syms.length }).ok;
+}
+
+function findSpans(needles: string[], symbols: string[]): { start: number; end: number }[] {
+  const keys = needles.map((nd) => chars(nd)).filter((key) => key.length);
+  const spans: { start: number; end: number }[] = [];
+  for (let i = 0; i < symbols.length; i++) {
+    for (const key of keys) {
+      if (i + key.length > symbols.length) continue;
+      if (key.every((ch, k) => symbols[i + k] === ch)) spans.push({ start: i, end: i + key.length });
+    }
+  }
+  return spans;
+}
+
+function splitsAt(dfa: DFA, cuts: Cut[], needles: string[], text: string): { low: Budget; high: Budget } {
+  const symbols = chars(text);
+  const spans = findSpans(needles, symbols);
+  return {
+    low: assessBudget(dfa, symbols, spans, cuts, 0.4),
+    high: assessBudget(dfa, symbols, spans, cuts, 0.9),
+  };
+}
+
+function separates(low: Budget, high: Budget): boolean {
+  return low.fallbackAt !== null && low.naive !== low.adaptive && high.fallbackAt === null && high.naive === high.adaptive;
+}
+
+function findBadCandidates(dfa: DFA, needles: string[], good: string | null): string[] {
+  const alpha = dfa.alphabet;
+  const seeds = [...needles].sort((a, b) => chars(a).length - chars(b).length);
+  const cands: string[] = [];
+  for (const lit of seeds) {
+    cands.push(lit, lit.repeat(4), lit.repeat(6));
+    for (const ch of alpha) {
+      cands.push(lit + ch, ch + lit, lit + ch + ch, (lit + ch).repeat(3));
+      if (chars(lit).length > 1) cands.push(chars(lit).slice(0, -1).join("") + ch);
+    }
+  }
+  if (good) for (const ch of alpha) cands.push(good + ch, ch + good, (good + ch).repeat(2));
+  const bad: string[] = [];
+  const seen = new Set<string>();
+  for (const cand of cands) {
+    if (!cand || seen.has(cand) || !needles.some((nd) => cand.includes(nd))) continue;
+    seen.add(cand);
+    if (!wordOk(dfa, cand)) bad.push(cand);
+  }
+  return bad.sort((a, b) => chars(b).length - chars(a).length);
+}
+
+function criticalHaystack(dfa: DFA, cuts: Cut[], needles: string[]): { text: string; splits: boolean } {
+  const sep = ["#", "·", "|", "/", "§", "※"].find((ch) => !dfa.alphabet.includes(ch)) ?? "※";
+  const good = findGood(dfa, needles) ?? needles[0];
+  const glue = (slots: string[]) => slots.join(sep);
+  const bads = findBadCandidates(dfa, needles, good);
+  if (!bads.length) return { text: glue(Array.from({ length: 8 }, () => good)), splits: false };
+  let costly: string | null = null;
+  const heads = [[good, good], [good, good, good], [good]];
+  for (const bad of bads) {
+    for (const head of heads) {
+      const slots = [...head];
+      for (let k = 0; k < 8; k++) {
+        slots.push(bad);
+        const text = glue(slots);
+        const { low, high } = splitsAt(dfa, cuts, needles, text);
+        if (!separates(low, high)) continue;
+        if (low.naive > low.adaptive) return { text, splits: true };
+        costly ??= text;
       }
     }
   }
-  return { fast: fastSyms.join(""), slow, slowIsFp, mixed: mixedHaystack(dfa, needles) };
+  if (costly) return { text: costly, splits: true };
+  return { text: glue([good, good, bads[0], bads[0], bads[0], bads[0]]), splits: false };
 }
 
-function shortestAccept(dfa: DFA): string | null {
-  const seen = new Set<number>([dfa.start]);
-  const queue: { state: number; word: string }[] = [{ state: dfa.start, word: "" }];
+function findGood(dfa: DFA, needles: string[]): string | null {
+  const alpha = dfa.alphabet;
+  if (!alpha.length) return null;
+  const depth = alpha.length > 6 ? 3 : 5;
+  const seen = new Set<string>([""]);
+  const queue = [""];
   while (queue.length) {
-    const cur = queue.shift();
-    if (!cur) break;
-    if (cur.word && (dfa.accept[cur.state] ?? []).length) return cur.word;
-    if (chars(cur.word).length >= 8) continue;
-    for (let i = 0; i < dfa.alphabet.length; i++) {
-      const nxt = dfa.delta[cur.state][i];
-      if (nxt === undefined || dfa.dead[nxt] || seen.has(nxt)) continue;
-      seen.add(nxt);
-      queue.push({ state: nxt, word: cur.word + dfa.alphabet[i] });
+    const word = queue.shift() ?? "";
+    if (word && needles.some((nd) => word.includes(nd)) && wordOk(dfa, word)) return word;
+    if (chars(word).length >= depth) continue;
+    for (const ch of alpha) {
+      const next = word + ch;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      queue.push(next);
     }
   }
   return null;
 }
 
-function mixedHaystack(dfa: DFA, needles: string[]): string | null {
-  const bad = [...needles].sort((a, b) => chars(a).length - chars(b).length).find((lit) => {
-    const syms = chars(lit);
-    return !runFrom(dfa, syms, 0, syms.length).ok;
-  });
-  const good = shortestAccept(dfa);
-  if (!bad || !good) return null;
-  return good + good + bad.repeat(6);
-}

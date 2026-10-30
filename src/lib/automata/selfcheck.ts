@@ -212,13 +212,39 @@ sound("a|ε");
   const drills = exampleHaystacks(dfa, compiled.model.alphabet, pre.cuts);
   if (!drills?.slowIsFp) throw new Error("a+b should offer a false-positive sample");
   if (drills.fast.includes("a")) throw new Error(`fast sample should avoid the literal, got ${drills.fast}`);
-  if (!drills.mixed) throw new Error("a+b should offer a mixed sample");
+  if (!drills.mixed) throw new Error("a+b should offer a critical sample");
+  if (!drills.mixedSplits) throw new Error("a+b critical sample should cross the threshold");
   const mixedSyms = [...drills.mixed];
   const mixed = playPrefilter(compiled.model.patterns, mixedSyms, "ac");
   const low = assessBudget(dfa, mixedSyms, mixed.spans, mixed.cuts, 0.4);
   const high = assessBudget(dfa, mixedSyms, mixed.spans, mixed.cuts, 0.9);
-  if (low.fallbackAt === null || !(low.naive > low.adaptive)) throw new Error(`mixed low ${low.naive} ${low.adaptive}`);
-  if (high.fallbackAt !== null || high.naive !== high.adaptive) throw new Error(`mixed high should stay on the prefilter ${high.naive} ${high.adaptive}`);
+  if (low.fallbackAt === null || !(low.naive > low.adaptive)) throw new Error(`mixed low ${low.naive} ${low.adaptive} ${low.rate}`);
+  if (high.fallbackAt !== null || high.naive !== high.adaptive) throw new Error(`mixed high should stay on the prefilter ${high.naive} ${high.adaptive} ${high.rate}`);
+}
+
+{
+  const sources = ["(a|b)*abb", "a(b|c)*", "a*b", "(0|1)*1", "整数: (0|1)+\n标识: (a|b)(a|b|0|1)*", "键值: (?<键>[ab]+):(?<值>[01]+)", "你: 你\n好: 你好+"];
+  for (const source of sources) {
+    const compiled = compile(source, "");
+    if (!compiled.ok) throw new Error(source + compiled.message);
+    const dfa = compiled.model.hopThom.ok ? compiled.model.hopThom.value.dfa : compiled.model.thompson.dfa;
+    const drills = exampleHaystacks(dfa, compiled.model.alphabet, compiled.model.patterns.map((p) => ({ rule: p.id, name: p.name, literals: requiredLiterals(p.ast) })));
+    const needles = compiled.model.patterns.flatMap((p) => requiredLiterals(p.ast) ?? []);
+    if (!needles.length) {
+      if (drills) throw new Error(`${source} has no literals but returned drills`);
+      continue;
+    }
+    if (!drills?.mixed) throw new Error(`${source} missing critical sample`);
+    if (!drills.mixedSplits) continue;
+    const symbols = [...drills.mixed];
+    for (const kind of ["ac", "teddy"] as const) {
+      const pre = playPrefilter(compiled.model.patterns, symbols, kind);
+      const low = assessBudget(dfa, symbols, pre.spans, pre.cuts, 0.4);
+      const high = assessBudget(dfa, symbols, pre.spans, pre.cuts, 0.9);
+      if (low.fallbackAt === null || !(low.naive > low.adaptive)) throw new Error(`${source} ${kind} low did not fall back`);
+      if (high.fallbackAt !== null || high.naive !== high.adaptive) throw new Error(`${source} ${kind} high still fell back ${high.rate}`);
+    }
+  }
 }
 
 console.log("selfcheck ok", cases.length, "cases");
