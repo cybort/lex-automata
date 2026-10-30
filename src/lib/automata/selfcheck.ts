@@ -1,7 +1,7 @@
 import { agrees, compile, isomorphic } from "./pipeline";
 import { dfaTags } from "./nfa";
 import { matchNfa, simulateCaptures } from "./match";
-import { prefilterBlocks, requiredLiterals } from "./prefilter";
+import { assessBudget, exampleHaystacks, playPrefilter, prefilterBlocks, requiredLiterals } from "./prefilter";
 
 function words(alpha: string[], maxLen: number): string[][] {
   const out: string[][] = [[]];
@@ -184,6 +184,34 @@ sound("a|ε");
   if (!prefilterBlocks(compiled.model.patterns, [..."ababa"], "teddy")) throw new Error("teddy missed ababa");
   if (prefilterBlocks(compiled.model.patterns, [..."ababb"], "ac")) throw new Error("ac blocked ababb");
   if (prefilterBlocks(compiled.model.patterns, [..."ababb"], "teddy")) throw new Error("teddy blocked ababb");
+}
+
+{
+  const compiled = compile("(a|b)*abb", "");
+  if (!compiled.ok) throw new Error(compiled.message);
+  const dfa = compiled.model.hopThom.ok ? compiled.model.hopThom.value.dfa : compiled.model.thompson.dfa;
+  const quiet = playPrefilter(compiled.model.patterns, [..."ab".repeat(12)], "ac");
+  if (!quiet.blocked) throw new Error("abab… should miss abb");
+  const skip = assessBudget(dfa, [..."ab".repeat(12)], quiet.spans, quiet.cuts, 0.4);
+  if (skip.wakes !== 0 || skip.fallbackAt !== null || !(skip.adaptive < skip.linear)) {
+    throw new Error(`speedup ${skip.adaptive} vs ${skip.linear}`);
+  }
+}
+
+{
+  const compiled = compile("a+b", "");
+  if (!compiled.ok) throw new Error(compiled.message);
+  const dfa = compiled.model.hopThom.ok ? compiled.model.hopThom.value.dfa : compiled.model.thompson.dfa;
+  const text = [..."a".repeat(8)];
+  const pre = playPrefilter(compiled.model.patterns, text, "ac");
+  const budget = assessBudget(dfa, text, pre.spans, pre.cuts, 0.4);
+  if (budget.falsePos < 4) throw new Error(`expected false wakes, got ${budget.falsePos} / ${budget.wakes}`);
+  if (budget.fallbackAt === null) throw new Error("high false-positive rate should fall back");
+  if (!(budget.naive > budget.adaptive)) throw new Error(`naive ${budget.naive} should exceed adaptive ${budget.adaptive}`);
+  if (!(budget.adaptive > budget.linear)) throw new Error(`false positives should be slower than linear (${budget.adaptive} vs ${budget.linear})`);
+  const drills = exampleHaystacks(dfa, compiled.model.alphabet, pre.cuts);
+  if (!drills?.slowIsFp) throw new Error("a+b should offer a false-positive sample");
+  if (drills.fast.includes("a")) throw new Error(`fast sample should avoid the literal, got ${drills.fast}`);
 }
 
 console.log("selfcheck ok", cases.length, "cases");

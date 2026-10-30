@@ -1,4 +1,4 @@
-import type { Ast, Pattern } from "./types";
+import type { Ast, DFA, Pattern } from "./types";
 import type { ViewEdge, ViewModel, ViewNode } from "./view";
 import type { Verdict } from "./match";
 
@@ -36,6 +36,7 @@ export type Preplay = {
   blocked: boolean;
   frames: PreFrame[];
   cuts: Cut[];
+  spans: { start: number; end: number }[];
   ac: AcMachine | null;
   kind: FilterKind;
 };
@@ -394,7 +395,7 @@ export function playPrefilter(patterns: Pattern[], symbols: string[], kind: Filt
       hits: [],
       teddy: null,
     });
-    return { blocked: false, frames, cuts, ac: null, kind };
+    return { blocked: false, frames, cuts, spans: [], ac: null, kind };
   }
 
   const alive = new Set(free);
@@ -466,7 +467,7 @@ export function playPrefilter(patterns: Pattern[], symbols: string[], kind: Filt
       hits: hits.map((h) => ({ ...h })),
       teddy: null,
     });
-    return { blocked, frames, cuts, ac, kind };
+    return { blocked, frames, cuts, spans: hits.map((h) => ({ ...h })), ac, kind };
   }
 
   const w = Math.min(...needles.map((n) => n.symbols.length));
@@ -513,7 +514,7 @@ export function playPrefilter(patterns: Pattern[], symbols: string[], kind: Filt
       hits: [],
       teddy: snap("", null, new Set()),
     });
-    return { blocked, frames, cuts, ac: null, kind };
+    return { blocked, frames, cuts, spans: hits.map((h) => ({ ...h })), ac: null, kind };
   }
   for (let end = w - 1; end < symbols.length; end++) {
     const start = end - w + 1;
@@ -562,7 +563,7 @@ export function playPrefilter(patterns: Pattern[], symbols: string[], kind: Filt
     hits: hits.map((h) => ({ ...h })),
     teddy: snap("", null, new Set()),
   });
-  return { blocked, frames, cuts, ac: null, kind };
+  return { blocked, frames, cuts, spans: hits.map((h) => ({ ...h })), ac: null, kind };
 }
 
 export function prefilterBlocks(patterns: Pattern[], symbols: string[], kind: FilterKind): boolean {
@@ -572,4 +573,167 @@ export function prefilterBlocks(patterns: Pattern[], symbols: string[], kind: Fi
 export function viewPrefilter(ac: AcMachine | null, active: number, hot: { from: number; to: number; sym: string }[]): ViewModel {
   if (!ac) return { nodes: [], edges: [], start: 0 };
   return paintHot(viewAc(ac, active), hot);
+}
+
+export const FILTER_WEIGHT = 1;
+export const DFA_WEIGHT = 4;
+export const WAKE_FLOOR = 4;
+const LOOK_AHEAD = 8;
+
+export type Mark = "skip" | "tp" | "fp" | "linear";
+
+export type WakeEvent = {
+  start: number;
+  end: number;
+  ok: boolean;
+  steps: number;
+  rate: number;
+};
+
+export type Budget = {
+  threshold: number;
+  forced: boolean;
+  linear: number;
+  naive: number;
+  adaptive: number;
+  wakes: number;
+  falsePos: number;
+  truePos: number;
+  rate: number;
+  fallbackAt: number | null;
+  marks: Mark[];
+  events: WakeEvent[];
+};
+
+function runFrom(dfa: DFA, symbols: string[], from: number, needEnd: number): { ok: boolean; steps: number; end: number } {
+  let state = dfa.start;
+  let steps = 0;
+  const limit = Math.min(symbols.length, Math.max(needEnd + LOOK_AHEAD, from));
+  for (let i = from; i < limit; i++) {
+    const si = dfa.alphabet.indexOf(symbols[i]);
+    steps++;
+    if (si < 0) return { ok: false, steps, end: i };
+    state = dfa.delta[state][si];
+    if ((dfa.accept[state] ?? []).length > 0 && i + 1 >= needEnd) return { ok: true, steps, end: i + 1 };
+    if (dfa.dead[state]) return { ok: false, steps, end: i + 1 };
+  }
+  return { ok: false, steps, end: limit };
+}
+
+export function assessBudget(
+  dfa: DFA,
+  symbols: string[],
+  spans: { start: number; end: number }[],
+  cuts: Cut[],
+  threshold: number,
+): Budget {
+  const n = symbols.length;
+  const forced = cuts.some((c) => !c.literals);
+  const hits = spans
+    .filter((h) => h.end > h.start && h.start >= 0 && h.start < n)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const unique: { start: number; end: number }[] = [];
+  for (const hit of hits) {
+    const prev = unique[unique.length - 1];
+    if (prev && prev.start === hit.start) {
+      if (hit.end > prev.end) prev.end = hit.end;
+      continue;
+    }
+    unique.push({ ...hit });
+  }
+
+  const marks: Mark[] = Array(n).fill("skip");
+  const events: WakeEvent[] = [];
+  let naiveSteps = 0;
+  let adaptiveSteps = 0;
+  let wakes = 0;
+  let falsePos = 0;
+  let truePos = 0;
+  let fallbackAt: number | null = null;
+
+  for (const hit of unique) {
+    const run = runFrom(dfa, symbols, hit.start, hit.end);
+    naiveSteps += run.steps;
+    if (fallbackAt !== null) continue;
+    wakes++;
+    adaptiveSteps += run.steps;
+    if (run.ok) truePos++;
+    else falsePos++;
+    const rate = wakes ? falsePos / wakes : 0;
+    events.push({ start: hit.start, end: hit.end, ok: run.ok, steps: run.steps, rate });
+    const paintTo = Math.min(n, Math.max(hit.end, run.end));
+    for (let i = hit.start; i < paintTo; i++) marks[i] = run.ok ? "tp" : "fp";
+    if (wakes >= WAKE_FLOOR && rate > threshold) fallbackAt = Math.min(n, hit.end);
+  }
+
+  if (forced) {
+    for (let i = 0; i < n; i++) if (marks[i] === "skip") marks[i] = "linear";
+  }
+  if (fallbackAt !== null) {
+    for (let i = fallbackAt; i < n; i++) marks[i] = "linear";
+  }
+
+  const filterEnd = fallbackAt ?? n;
+  const linearTail = forced ? n : fallbackAt === null ? 0 : n - fallbackAt;
+  const linear = DFA_WEIGHT * n;
+  const naive = FILTER_WEIGHT * n + DFA_WEIGHT * naiveSteps + (forced ? linear : 0);
+  const adaptive = FILTER_WEIGHT * filterEnd + DFA_WEIGHT * adaptiveSteps + DFA_WEIGHT * linearTail;
+  return {
+    threshold,
+    forced,
+    linear,
+    naive,
+    adaptive,
+    wakes,
+    falsePos,
+    truePos,
+    rate: wakes ? falsePos / wakes : 0,
+    fallbackAt,
+    marks,
+    events,
+  };
+}
+
+export function exampleHaystacks(
+  dfa: DFA,
+  alphabet: string[],
+  cuts: Cut[],
+): { fast: string; slow: string; slowIsFp: boolean } | null {
+  const needles = cuts.flatMap((c) => c.literals ?? []);
+  if (!needles.length || !alphabet.length) return null;
+  const fastSyms: string[] = [];
+  for (let i = 0; i < 24; i++) {
+    let picked = alphabet[0];
+    for (const ch of alphabet) {
+      const trial = fastSyms.join("") + ch;
+      if (needles.every((nd) => !trial.endsWith(nd))) {
+        picked = ch;
+        break;
+      }
+    }
+    fastSyms.push(picked);
+  }
+  let slow = needles[0].repeat(8);
+  let slowIsFp = false;
+  for (const lit of [...needles].sort((a, b) => chars(a).length - chars(b).length)) {
+    const syms = chars(lit);
+    const run = runFrom(dfa, syms, 0, syms.length);
+    if (!run.ok) {
+      slow = lit.repeat(8);
+      slowIsFp = true;
+      break;
+    }
+  }
+  if (!slowIsFp) {
+    const ch = chars(needles[0])[0];
+    if (needles.includes(ch)) {
+      const repeated = chars(ch.repeat(12));
+      const fails = repeated.filter((_, i) => !runFrom(dfa, repeated, i, i + 1).ok).length;
+      if (fails >= WAKE_FLOOR) {
+        slow = ch.repeat(12);
+        slowIsFp = true;
+      }
+    }
+  }
+  return { fast: fastSyms.join(""), slow, slowIsFp };
 }

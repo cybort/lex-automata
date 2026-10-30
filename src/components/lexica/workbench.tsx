@@ -3,7 +3,7 @@ import { Dices, Download, Pause, Play, SkipBack, SkipForward } from "lucide-reac
 import { AutomatonFigure } from "@/components/lexica/graph";
 import { randomProgram } from "@/lib/automata/random";
 import { lazyWalk, matchDfa, matchNfa, simulateCaptures, textToSymbols, witnesses, type Capture } from "@/lib/automata/match";
-import { playPrefilter, viewPrefilter, type FilterKind, type TeddySnap } from "@/lib/automata/prefilter";
+import { assessBudget, exampleHaystacks, playPrefilter, viewPrefilter, WAKE_FLOOR, type Budget, type FilterKind, type Mark, type TeddySnap } from "@/lib/automata/prefilter";
 import { printAst } from "@/lib/automata/parse";
 import { compile, type Model } from "@/lib/automata/pipeline";
 import type { BrzPhase, DFA, HopFrame, NFA, Note } from "@/lib/automata/types";
@@ -700,6 +700,7 @@ function Match({
   const [text, setText] = useState("abb");
   const [mode, setMode] = useState<"nfa" | "lazy" | "hop" | "brz">("nfa");
   const [filter, setFilter] = useState<"off" | FilterKind>("off");
+  const [threshold, setThreshold] = useState(0.4);
   const symbols = textToSymbols(text);
   const caps = useMemo(() => simulateCaptures(model.nfa, symbols), [model, text]);
   const hopDfa = model.hopThom.ok ? model.hopThom.value.dfa : model.thompson.dfa;
@@ -715,6 +716,15 @@ function Match({
     () => (filter === "off" ? null : playPrefilter(model.patterns, symbols, filter)),
     [filter, model, symbols],
   );
+  const confirmDfa = model.hopThom.ok ? model.hopThom.value.dfa : model.thompson.dfa;
+  const budget = useMemo(
+    () => (pre ? assessBudget(confirmDfa, symbols, pre.spans, pre.cuts, threshold) : null),
+    [pre, confirmDfa, symbols, threshold],
+  );
+  const drills = useMemo(
+    () => (pre ? exampleHaystacks(confirmDfa, model.alphabet, pre.cuts) : null),
+    [pre, confirmDfa, model.alphabet],
+  );
   const play = useMemo(() => {
     const machine = frames.map((f) => ({ ...f, phase: "machine" as const, hits: [] as { start: number; end: number }[], teddy: null as TeddySnap | null }));
     if (!pre) return machine;
@@ -727,7 +737,7 @@ function Match({
   useEffect(() => {
     setStep(0);
     setPlaying(false);
-  }, [text, mode, model, filter]);
+  }, [text, mode, model, filter, threshold]);
   const safe = Math.min(step, Math.max(0, play.length - 1));
   const frame = play[safe];
   const machineFrame = frame?.phase === "machine" ? frame : undefined;
@@ -741,7 +751,7 @@ function Match({
     <StageShell
       kicker="匹配回放"
       title="把文本喂进四台机器"
-      body="NFA 用活动集和 ε-闭包。惰性 DFA 只沿着这段文本现算子集。最小 DFA 在完整转移上一步一格。打开预过滤后，先拆出每条规则的必现子串，用 Aho-Corasick 或 Teddy 挡掉不可能的文本，活下来才启动机器。捕获组写在 Thompson 的 ε 边上。"
+      body="NFA 用活动集和 ε-闭包。惰性 DFA 只沿着这段文本现算子集。最小 DFA 在完整转移上一步一格。预过滤先找必现子串：没有就整段跳过；命中才唤醒 DFA。假阳性率超过阈值就停止唤醒，退回线性扫描。捕获组写在 Thompson 的 ε 边上。"
     >
       <div className="mb-3 flex flex-wrap gap-2">
         {(
@@ -790,6 +800,16 @@ function Match({
           ))}
         </p>
       ) : null}
+      {budget ? (
+        <CostBoard
+          budget={budget}
+          onThreshold={setThreshold}
+          fast={drills?.fast}
+          slow={drills?.slow}
+          slowIsFp={drills?.slowIsFp ?? false}
+          onFill={setText}
+        />
+      ) : null}
       <label className="text-sm text-muted" htmlFor="sample">
         待匹配文本。整串必须属于某条规则才算接受。
       </label>
@@ -819,7 +839,7 @@ function Match({
         tags={verdict?.tags ?? []}
         names={names}
         captures={frame?.phase === "machine" ? (caps[frame?.index ?? 0] ?? []) : []}
-        hits={frame?.hits ?? []}
+        marks={tapeMarks(budget, frame?.phase, frame?.index ?? 0)}
       />
       <div className="mt-3">
         {frame?.phase === "filter" && frame.teddy ? (
@@ -855,6 +875,111 @@ function Match({
   );
 }
 
+function tapeMarks(budget: Budget | null, phase: string | undefined, index: number): (Mark | undefined)[] | undefined {
+  if (!budget) return undefined;
+  const revealAll = phase === "machine" || index >= budget.marks.length;
+  return budget.marks.map((mark, i) => (revealAll || i < index ? mark : undefined));
+}
+
+function CostBoard({
+  budget,
+  onThreshold,
+  fast,
+  slow,
+  slowIsFp,
+  onFill,
+}: {
+  budget: Budget;
+  onThreshold: (n: number) => void;
+  fast?: string;
+  slow?: string;
+  slowIsFp: boolean;
+  onFill: (text: string) => void;
+}) {
+  const max = Math.max(budget.linear, budget.naive, budget.adaptive, 1);
+  const ratio = budget.linear === 0 ? 1 : budget.adaptive / budget.linear;
+  const ahead = budget.adaptive <= budget.linear;
+  const rate = Math.round(budget.rate * 100);
+  const gate = Math.round(budget.threshold * 100);
+  const verdict = budget.forced
+    ? "有规则没有必现子串，DFA 反正要线性跑完，预过滤只会加价。"
+    : budget.fallbackAt !== null
+      ? `假阳性率 ${rate}% 超过 ${gate}%，第 ${budget.wakes} 次唤醒后退回线性，不再继续叫醒 DFA。`
+      : budget.wakes >= WAKE_FLOOR && budget.rate > budget.threshold
+        ? "假阳性已经越线。"
+        : budget.wakes === 0
+          ? "没有命中子串，DFA 全程没醒。这是预过滤省下的部分。"
+          : budget.wakes < WAKE_FLOOR
+            ? `只唤醒了 ${budget.wakes} 次，还不到 ${WAKE_FLOOR} 次，先不退回。`
+            : "假阳性率还在阈值下面，继续用预过滤。";
+  return (
+    <div className="mb-3 rounded-md border border-line bg-bg px-3 py-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm text-muted">假阳性阈值 {gate}%</span>
+        <input
+          type="range"
+          min={0.1}
+          max={0.9}
+          step={0.1}
+          value={budget.threshold}
+          aria-label="假阳性阈值"
+          onChange={(e) => onThreshold(Number(e.target.value))}
+          className="h-11 w-40 accent-sage"
+        />
+        <span className={"font-mono text-sm " + (budget.rate > budget.threshold ? "text-ember" : "text-sage")}>
+          当前 {budget.wakes ? `${rate}%` : "—"} · {budget.falsePos} 假 / {budget.truePos} 真
+        </span>
+      </div>
+      <div className="relative mt-2 h-2 rounded-sm bg-raised">
+        <div
+          className={"h-full rounded-sm " + (budget.rate > budget.threshold ? "bg-ember" : "bg-sage")}
+          style={{ width: `${Math.min(100, rate)}%` }}
+        />
+        <div className="absolute top-[-3px] h-3.5 w-px bg-fg" style={{ left: `${gate}%` }} />
+      </div>
+      <p className="mt-2 text-sm text-fg">{verdict}</p>
+      <p className={"mt-1 font-mono text-sm " + (ahead ? "text-sage" : "text-ember")}>
+        {ahead
+          ? `监测后的代价是线性的 ${ratio.toFixed(2)} 倍，省 ${budget.linear - budget.adaptive} 步。`
+          : `监测后的代价是线性的 ${ratio.toFixed(2)} 倍，多 ${budget.adaptive - budget.linear} 步。`}
+        {budget.naive > budget.adaptive ? ` 若死磕预过滤还要再多 ${budget.naive - budget.adaptive} 步。` : ""}
+      </p>
+      <div className="mt-3 grid gap-2">
+        <CostBar label="线性扫描" value={budget.linear} max={max} tone="bg-muted" />
+        <CostBar label="死磕预过滤" value={budget.naive} max={max} tone="bg-ember" />
+        <CostBar label="监测后退回" value={budget.adaptive} max={max} tone={ahead ? "bg-sage" : "bg-ember"} />
+      </div>
+      <p className="mt-2 text-sm text-muted">
+        过滤一步算 {1}，DFA 一步算 {4}。灰是没醒的字符，绿是确认成功，红是叫醒了却失败，退回之后改由 DFA 线性扫完。
+      </p>
+      {fast ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" onClick={() => onFill(fast)} className="h-11 rounded-sm border border-line px-3 text-sm text-fg hover:border-sage">
+            填入全跳过
+          </button>
+          {slow ? (
+            <button type="button" onClick={() => onFill(slow)} className="h-11 rounded-sm border border-line px-3 text-sm text-fg hover:border-sage">
+              {slowIsFp ? "填入假阳性" : "填入密集命中"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CostBar({ label, value, max, tone }: { label: string; value: number; max: number; tone: string }) {
+  return (
+    <div className="grid grid-cols-[6.5rem_1fr_auto] items-center gap-2 text-sm">
+      <span className="text-muted">{label}</span>
+      <div className="h-2 rounded-sm bg-raised">
+        <div className={"h-full rounded-sm " + tone} style={{ width: `${Math.max(2, (value / max) * 100)}%` }} />
+      </div>
+      <span className="font-mono text-fg">{value}</span>
+    </div>
+  );
+}
+
 function matchView(
   mode: "nfa" | "lazy" | "hop" | "brz",
   nfa: NFA,
@@ -885,7 +1010,7 @@ function Tape({
   tags,
   names,
   captures,
-  hits = [],
+  marks,
 }: {
   symbols: string[];
   index: number;
@@ -893,7 +1018,7 @@ function Tape({
   tags: number[];
   names: string[];
   captures: Capture[];
-  hits?: { start: number; end: number }[];
+  marks?: (Mark | undefined)[];
 }) {
   const done = verdict === "accept" || verdict === "reject";
   const live = verdict === "accept" ? captures.filter((c) => tags.includes(c.rule)) : captures;
@@ -902,22 +1027,30 @@ function Tape({
     if (cap.start === null || cap.end === null) continue;
     for (let i = cap.start; i < cap.end; i++) marked.add(i);
   }
-  const hitAt = new Set<number>();
-  for (const hit of hits) for (let i = hit.start; i < hit.end; i++) hitAt.add(i);
   return (
     <div className="mt-4 rounded-md border border-line bg-surface px-3 py-3">
       <div className="flex flex-wrap gap-1 font-mono text-lg">
         {symbols.length === 0 ? <span className="text-muted">ε</span> : null}
         {symbols.map((ch, i) => {
           const cursor = i === index && !done;
+          const mark = marks?.[i];
+          const tone = cursor
+            ? "bg-sage text-ink "
+            : mark === "fp"
+              ? "bg-ember/40 text-fg "
+              : mark === "tp"
+                ? "bg-sage/25 text-fg "
+                : mark === "linear"
+                  ? "bg-raised text-muted "
+                  : mark === "skip"
+                    ? "text-muted "
+                    : i < index
+                      ? "text-muted "
+                      : "text-fg ";
           return (
           <span
             key={`${ch}-${i}`}
-            className={
-              "inline-flex h-11 min-w-8 items-center justify-center px-1 " +
-              (cursor ? "bg-sage text-ink " : hitAt.has(i) ? "bg-ember/30 text-fg " : i < index ? "text-muted " : "text-fg ") +
-              (marked.has(i) ? "border-b-2 border-sage" : "")
-            }
+            className={"inline-flex h-11 min-w-8 items-center justify-center px-1 " + tone + (marked.has(i) ? "border-b-2 border-sage" : "")}
           >
             {ch}
           </span>
