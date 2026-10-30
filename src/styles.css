@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source ".";
 
 @theme {
   --font-sans: "Literata", "Iowan Old Style", Palatino, "Palatino Linotype", serif;
